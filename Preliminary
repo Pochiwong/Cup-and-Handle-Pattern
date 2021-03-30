@@ -1,0 +1,178 @@
+# To Get a List of all NASDAQ Securities as CSV file
+import os
+import pandas as pd
+import yfinance as yf
+from pandas_datareader import data as pdr
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+import time
+
+import datetime
+tdy = datetime.datetime.now()
+yyyymmdd600 = tdy - datetime.timedelta(days = 600)
+yyyymmdd2000 = tdy - datetime.timedelta(days = 2000)
+print(tdy,yyyymmdd600,yyyymmdd2000)
+
+os.system("curl --ftp-ssl anonymous:jupi@jupi.com "
+          "ftp://ftp.nasdaqtrader.com/SymbolDirectory/nasdaqlisted.txt "
+          "> nasdaq.lst")
+
+#os.system("head -20 nasdaq.lst")
+#print()
+
+#os.system("tail -5 nasdaq.lst")
+#print()
+
+os.system("tail -n +44 nasdaq.lst | cat | sed '$d' | sed 's/|/ /g' > "
+          "nasdaq.lst2")
+
+os.system("awk '{print $1}' nasdaq.lst2 > nasdaq.csv")
+os.system("echo; head nasdaq.csv; echo '...'; tail nasdaq.csv")
+
+nasdaq_list = pd.read_csv("nasdaq.csv", index_col=None, header=None)
+nasdaq_list.columns=["Ticker"]
+print(nasdaq_list)
+
+yf.pdr_override()
+
+import math
+#print(math.ceil(len(nasdaq_list)/1000))
+
+def get(tickers, startdate):
+  def data(ticker):
+    return (pdr.get_data_yahoo(ticker, start=startdate))
+    time.sleep(0.01)
+  datas = map (data, tickers)
+  return(pd.concat(datas, keys=tickers, names=['Ticker', 'Date']))
+
+signals = []
+signals_last = pd.DataFrame()
+a = math.ceil(len(nasdaq_list)/500)
+print(a)
+
+for x in range(a):
+#for x in range(9):
+    tickers = nasdaq_list['Ticker'].loc[500*x:500*x+499]
+   #tickers = nasdaq_list['Ticker'].loc[100*x:100*x+99]
+    all_data = get(tickers, yyyymmdd600.strftime('%Y-%m-%d'))
+    #daily_close_px = all_data[['Adj Close']].reset_index().pivot('Date', 'Ticker', 'Close')
+    
+    
+    # Condition 1: Current Price > 150 SMA and > 200 SMA
+    # Condition 2: 50 SMA > 200 SMA
+    # Condition 3: 200 SMA trending up for at least 1 month(20 days)
+    # Condition 4: 50 SMA> 150 SMA and 50 SMA> 200 SMA
+    # Condition 5: Current Price > 50 SMA
+    # Condition 6: Current Price is at least 40% above 52 week low
+    # Condition 7: Current Price is within 25% of 52 week high
+    # Condition 8: Turnover is larger than 1.5 million
+    # Relative Strength Rating
+    
+    # Initialize the `signals` DataFrame
+    #signals=pd.DataFrame(index=all_data.index)
+    signals.append(pd.DataFrame(index=all_data.index))
+    #signals['signal'] = 0.0
+    
+    # Create 'Adj Close'
+    signals[x]['Adj Close'] = all_data['Adj Close']
+    
+    #Create 'Volume', 'Turnover'
+    signals[x]['Volume'] = all_data['Volume']   
+    signals[x]['Turnover'] = signals[x]['Volume']*signals[x]['Adj Close']
+    
+    # Create SMA_20, SMA_50, SMA_150, SMA_200
+    sma = [20, 50, 150, 200]
+    for y in sma:
+        signals[x]['SMA_'+str(y)] = all_data.groupby('Ticker')['Adj Close'].rolling(window=y, min_periods=y, center=False).mean().reset_index(0,drop=True)
+        
+    for z in range(3,15,3):
+        signals[x]['Close_'+str(z)+'mth'] =signals[x].groupby('Ticker')['Adj Close'].shift(z*20)
+    
+    #Create SMA_200_20 for SMA_200 in last month
+    signals[x]['SMA_200_20'] = signals[x].groupby('Ticker')['SMA_200'].shift(20)
+    
+    #Create High_52week, Low_52_week
+    signals[x]['High_52week'] = all_data.groupby('Ticker')['Adj Close'].rolling(window=260, min_periods=260, center=False).max().reset_index(0,drop=True)   
+    signals[x]['Low_52week'] = all_data.groupby('Ticker')['Adj Close'].rolling(window=260, min_periods=260, center=False).min().reset_index(0,drop=True)       
+    
+    # Condition 1: Current Price > 150 SMA and > 200 SMA  
+    signals[x].loc[signals[x]['Adj Close']>signals[x]['SMA_150'],'Cond_1_1']= 1
+    signals[x].loc[signals[x]['SMA_150']>signals[x]['SMA_200'],'Cond_1_2']= 1                
+    signals[x].loc[signals[x]['Cond_1_1']+signals[x]['Cond_1_2']==2,'Cond_1']= 1     
+    
+    # Condition 2: 50 SMA > 200 SMA
+    signals[x].loc[signals[x]['SMA_50']>signals[x]['SMA_200'],'Cond_2']= 1   
+    
+    # Condition 3: 200 SMA trending up for at least 1 month(20 days)
+    signals[x].loc[signals[x]['SMA_200']>signals[x]['SMA_200_20'],'Cond_3']= 1
+    
+    # Condition 4: 50 SMA> 150 SMA and 50 SMA> 200 SMA
+    signals[x].loc[signals[x]['SMA_50']>signals[x]['SMA_150'],'Cond_4_1']= 1
+    signals[x].loc[signals[x]['SMA_50']>signals[x]['SMA_200'],'Cond_4_2']= 1                
+    signals[x].loc[signals[x]['Cond_4_1']+signals[x]['Cond_4_2']==2,'Cond_4']= 1  
+    
+    # Condition 5: Current Price > 50 SMA
+    signals[x].loc[signals[x]['Adj Close']>signals[x]['SMA_50'],'Cond_5']= 1
+    
+    # Condition 6: Current Price is at least 40% above 52 week low
+    signals[x].loc[signals[x]['Adj Close']>=1.4*signals[x]['Low_52week'],'Cond_6']= 1
+            
+    # Condition 7: Current Price is within 25% of 52 week high
+    signals[x].loc[signals[x]['Adj Close']>=0.75*signals[x]['High_52week'],'Cond_7']= 1
+    
+    # Condition 8: Turnover is larger than 1.5 million
+    signals[x].loc[signals[x]['Turnover']>=1500000,'Cond_8']= 1
+     
+    # Relative Strength Rating    
+    signals[x]['RS_Rating']=(signals[x]['Adj Close']-signals[x]['Close_3mth'])/signals[x]['Close_3mth']*40
+    +(signals[x]['Adj Close']-signals[x]['Close_6mth'])/signals[x]['Close_6mth']*20
+    +(signals[x]['Adj Close']-signals[x]['Close_9mth'])/signals[x]['Close_9mth']*20
+    +(signals[x]['Adj Close']-signals[x]['Close_12mth'])/signals[x]['Close_12mth']*20
+            
+    signals_last = pd.concat([signals_last,signals[x].sort_index(ascending=False).groupby(['Ticker']).head(1)])
+    
+signals_buy  = signals_last[(signals_last.Cond_1==1) & (signals_last.Cond_2==1) & (signals_last.Cond_3==1) 
+                              & (signals_last.Cond_4==1) & (signals_last.Cond_5==1) & (signals_last.Cond_6==1) 
+                               & (signals_last.Cond_7==1) & (signals_last.Cond_8==1)].sort_values(by=['RS_Rating'], ascending=False).reset_index(0,drop=False).head(30)
+
+#Plot the top 30 stocks satisfying Condition 1-8
+plot_ticket = signals_buy['Ticker']
+plot_data = get(plot_ticket, yyyymmdd2000.strftime('%Y-%m-%d'))
+#plot_data['last_ticker'] = plot_data['Ticker'].shift(1)
+#math.ceil(len(plot_data))
+
+plot_data['Turnover'] = plot_data['Volume']*plot_data['Adj Close']
+    
+# Create SMA_20, SMA_50, SMA_150, SMA_200
+for y in sma:
+    plot_data['SMA_'+str(y)] = plot_data.groupby('Ticker')['Adj Close'].rolling(window=y, min_periods=y, center=False).mean().reset_index(0,drop=True)
+        
+for z in range(3,15,3):
+    plot_data['Close_'+str(z)+'mth'] =plot_data.groupby('Ticker')['Adj Close'].shift(z*20)
+    
+plot_data = plot_data.reset_index(0,drop=False)
+plot_data_sep = [g for i,g in plot_data.groupby(plot_data['Ticker'].ne(plot_data['Ticker'].shift()).cumsum())]
+print (plot_data_sep[1])
+
+tickers_list = signals_buy['Ticker'].tolist()
+tickers_list[1]
+
+# Initialize the plot figure
+fig = {}
+
+for z in range(31):
+    fig[z] = plt.figure(figsize=(35,35))
+
+    # Add a subplot and label for y-axis
+    ax1 = fig[z].add_subplot(111,  ylabel='Price in $')
+    
+    plt.title('Ticker: '+tickers_list[z])
+    
+    # Plot the closing price
+    plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+    plt.gca().xaxis.set_major_locator(mdates.DayLocator(interval=50))
+    plot_data_sep[z]['Adj Close'].plot(ax=ax1, color='r', lw=2.)
+    
+    # Plot the short and long moving averages
+    plot_data_sep[z][['SMA_20', 'SMA_50', 'SMA_150', 'SMA_200']].plot(ax=ax1, lw=2.)
